@@ -1,0 +1,116 @@
+# xCloud-friendly n8n queue-mode stack.
+# Official 2.x example is 6 containers (main, worker, two task runners, Postgres, Redis).
+# That is too heavy for this 6 GB box, so this is the official shape
+# (n8n + worker + Redis + Postgres) pinned to 1.88.0 without runner sidecars,
+# plus a tiny nginx proxy so /zdt-marker.txt and the editor share one public port.
+# Memory caps are set so a pull cannot evict the other live sites.
+
+volumes:
+  db_storage:
+  n8n_storage:
+  redis_storage:
+
+services:
+  proxy:
+    image: nginx:1.27-alpine
+    mem_limit: 32m
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./zdt-marker.txt:/marker/zdt-marker.txt:ro
+    depends_on:
+      - n8n
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    mem_limit: 256m
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-n8n}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-n8n}
+      POSTGRES_NON_ROOT_USER: ${POSTGRES_NON_ROOT_USER:-n8napp}
+      POSTGRES_NON_ROOT_PASSWORD: ${POSTGRES_NON_ROOT_PASSWORD}
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - db_storage:/var/lib/postgresql/data
+      - ./init-data.sh:/docker-entrypoint-initdb.d/init-data.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h localhost -U ${POSTGRES_USER:-n8n} -d ${POSTGRES_DB:-n8n}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    mem_limit: 64m
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_storage:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:1.88.0
+    mem_limit: 512m
+    restart: unless-stopped
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB:-n8n}
+      DB_POSTGRESDB_USER: ${POSTGRES_NON_ROOT_USER:-n8napp}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_NON_ROOT_PASSWORD}
+      EXECUTIONS_MODE: queue
+      QUEUE_BULL_REDIS_HOST: redis
+      QUEUE_HEALTH_CHECK_ACTIVE: "true"
+      N8N_ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      N8N_HOST: ${N8N_HOST:-n8n.1wp.site}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: https
+      N8N_EDITOR_BASE_URL: ${N8N_EDITOR_BASE_URL:-https://n8n.1wp.site/}
+      WEBHOOK_URL: ${WEBHOOK_URL:-https://n8n.1wp.site/}
+      N8N_PROXY_HOPS: 1
+      N8N_SECURE_COOKIE: "true"
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_HIRING_BANNER_ENABLED: "false"
+    volumes:
+      - n8n_storage:/home/node/.n8n
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  n8n-worker:
+    image: docker.n8n.io/n8nio/n8n:1.88.0
+    mem_limit: 512m
+    restart: unless-stopped
+    command: worker
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB:-n8n}
+      DB_POSTGRESDB_USER: ${POSTGRES_NON_ROOT_USER:-n8napp}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_NON_ROOT_PASSWORD}
+      EXECUTIONS_MODE: queue
+      QUEUE_BULL_REDIS_HOST: redis
+      QUEUE_HEALTH_CHECK_ACTIVE: "true"
+      N8N_ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      N8N_DIAGNOSTICS_ENABLED: "false"
+    volumes:
+      - n8n_storage:/home/node/.n8n
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      n8n:
+        condition: service_started
