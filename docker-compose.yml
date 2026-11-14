@@ -114,3 +114,5 @@ services:
         condition: service_healthy
       n8n:
         condition: service_started
+
+this is not valid yaml: [[[[ broken-on-purpose
